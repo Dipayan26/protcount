@@ -26,10 +26,14 @@ need mktemp
 # Prefer curl, fall back to wget.
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -sSfL "$1" -o "$2"; }
-    fetch_stdout() { curl -sSfL "$1"; }
+    # Final URL after following redirects — used to discover the latest tag.
+    resolve_url() { curl -sIL -o /dev/null -w '%{url_effective}' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -qO "$2" "$1"; }
-    fetch_stdout() { wget -qO- "$1"; }
+    resolve_url() {
+        wget -qS --spider --max-redirect=10 "$1" 2>&1 \
+            | awk '/[Ll]ocation:/ { last = $2 } END { print last }'
+    }
 else
     err "need either curl or wget"
 fi
@@ -53,12 +57,22 @@ esac
 TARGET="${arch_part}-${os_part}"
 
 # --- find the latest released version --------------------------------
-say "Looking up the latest release..."
-VERSION="$(fetch_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep -m1 '"tag_name"' \
-    | sed -e 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//' -e 's/".*//')"
+# PROTCOUNT_VERSION pins a specific tag, e.g. PROTCOUNT_VERSION=v0.1.0
+if [ -n "${PROTCOUNT_VERSION:-}" ]; then
+    VERSION="$PROTCOUNT_VERSION"
+else
+    say "Looking up the latest release..."
+    # /releases/latest redirects to /releases/tag/<tag>, so the tag is just
+    # the last path segment. This deliberately avoids api.github.com, which
+    # is rate limited to 60 requests/hour per IP and fails on shared networks.
+    LATEST_URL="$(resolve_url "https://github.com/${REPO}/releases/latest")"
+    VERSION="${LATEST_URL##*/}"
+fi
 
-[ -n "$VERSION" ] || err "could not determine the latest release"
+case "$VERSION" in
+    v*) ;;
+    *)  err "could not determine the latest release (got '${VERSION}')" ;;
+esac
 
 NUMBER="${VERSION#v}"
 ASSET="${BINARY}-${NUMBER}-${TARGET}.tar.gz"
