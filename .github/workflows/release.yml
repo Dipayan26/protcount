@@ -1,0 +1,116 @@
+name: Release
+
+# Fires when you push a version tag, e.g. `git tag v0.1.0 && git push origin v0.1.0`.
+# workflow_dispatch also lets you run it by hand from the Actions tab.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Needed so the final job can create the release and upload assets.
+permissions:
+  contents: write
+
+env:
+  BINARY: protcount
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel the other platforms if one fails.
+      fail-fast: false
+      matrix:
+        include:
+          # musl links statically, so these run on old glibc (HPC nodes).
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Tag-less runs (workflow_dispatch) have no version in the ref.
+          if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="dev"; fi
+
+          STAGE="${BINARY}-${VERSION}-${{ matrix.target }}"
+          mkdir "$STAGE"
+
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "target/${{ matrix.target }}/release/${BINARY}.exe" "$STAGE/"
+          else
+            cp "target/${{ matrix.target }}/release/${BINARY}" "$STAGE/"
+          fi
+          cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
+
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a "${STAGE}.zip" "$STAGE" >/dev/null
+          else
+            tar czf "${STAGE}.tar.gz" "$STAGE"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            protcount-*.tar.gz
+            protcount-*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only cut an actual release for tag pushes, not manual test runs.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "protcount $GITHUB_REF_NAME" \
+            --generate-notes \
+            artifacts/* \
+            install.sh
