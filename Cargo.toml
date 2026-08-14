@@ -1,6 +1,6 @@
 [package]
 name = "protcount"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Dipayan Sarkar <dipayanskr@gmail.com>"]
 description = "Count amino acid composition of a protein sequence"
